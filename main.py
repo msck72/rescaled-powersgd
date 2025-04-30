@@ -2,7 +2,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from torchvision.models import resnet18
+from torchvision.models import resnet18, vgg16, resnet50
 from torchvision.datasets import CIFAR10
 from torch.utils.data import DataLoader
 from torchvision import transforms
@@ -11,6 +11,8 @@ from powersgd import optimizer_step
 from powersgd.ef_at_last_powersgd import Aggregator, PowerSGD, Config
 from powersgd.utils import params_in_optimizer
 
+
+import numpy as np
 
 
 ROUND = 0
@@ -47,6 +49,8 @@ def test(model, test_loader):
 def main():
     torch.manual_seed(42)
     model = resnet18()
+    # model = vgg16()
+    # model = resnet50()
 
     # use a dataset, say cifar10
     transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))])
@@ -55,15 +59,24 @@ def main():
 
     # define a loss function
     loss_fn = F.cross_entropy
-    optimizer = torch.optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9)
     # 1 Estimating gradient using powerSGD
 
     config = Config(rank=1, num_iters_per_step=1, start_compressing_after_num_steps=1)
     params = params_in_optimizer(optimizer)
+    print("BEFORE INITIALIZING THE POWERSGD COMPRESSOR")
     compressor = PowerSGD(params, config=config)
     grads_powersgd, grads_rescaled_powersgd = None, None
 
+    is_compressed_mask = compressor._compressed_gradients_layers_num()
+    # print(f"IS COMPRESSED MASK = ({len(is_compressed_mask)}) {is_compressed_mask}")
+    
+    # for i, param in enumerate(params):
+    #     if is_compressed_mask[i]:
+    #         shape = param.view(param.shape[0], -1).shape
+    #         print(f"params.shape = {shape}\t{sum(list(shape))}")
 
+    print('STARTED TRAINING')
     for batch, (x, y) in enumerate(train_loader):
         optimizer.zero_grad()
         y_pred = model(x)
@@ -82,12 +95,14 @@ def main():
             gp.copy_(g)
             grp.copy_(g)
 
-        if batch > 50:
-            powersgd_gradient_estimate = powersgd_compressor(grads_powersgd, compressor)
-            rescaled_powersgd_gradient_estimate = rescaled_powersgd_compressor(grads_rescaled_powersgd, compressor)
-        
-            # # compare the quality of compression
-            quality_of_compression(grads, powersgd_gradient_estimate, rescaled_powersgd_gradient_estimate)
+        # if batch > 50:
+        print('POWERSGD ESTIMATE')
+        powersgd_gradient_estimate = powersgd_compressor(grads_powersgd, compressor)
+        print('RESCALED POWERSGD ESTIMATE')
+        rescaled_powersgd_gradient_estimate = rescaled_powersgd_compressor(grads_rescaled_powersgd, compressor)
+    
+        # # compare the quality of compression
+        quality_of_compression(grads, powersgd_gradient_estimate, rescaled_powersgd_gradient_estimate)
 
         # optimizer_step(optimizer, compressor, 'aggregate_using_rescaled_grads')
         # optimizer_step(optimizer, compressor, 'aggregate')
@@ -103,7 +118,15 @@ def main():
         
         print('one step done\n\n')
         
-        if batch > 70:
+        if batch > 10:
+            print('SAVING THE GRADIENTS')
+            for i, (ag, pg) in enumerate(zip(grads, powersgd_gradient_estimate)):
+                if is_compressed_mask[i]:
+                    torch.save(ag, f'./gradients/resnet18_layer_{i}.pt')
+                    torch.save(pg, f"./powersgd_gradients/resnet18_layer_{i}.pt")
+                    # np.savetxt(f'./gradients/layer_{i}', ag.view(ag.shape[0], -1).numpy())
+        
+        if batch > 10:
             break
         # break
     # test(model, test_loader)
@@ -140,6 +163,9 @@ def quality_of_compression(actual_grad, powersgd_grad_est, rescaled_powersgd_gra
             temp = torch.norm(ag - pg)
             if temp != 0 and ROUND < 10:
                 f.write(f'{ag.shape} {torch.numel(ag)} {float(temp.numpy())}\n')
+            
+            # f.write(f'{ag.shape} {torch.numel(ag)} {float(temp.numpy())}\n')
+            
             powersgd_power_test += temp
     
     with open(f'rescaled_powersgds_power_{ROUND}.txt', 'w') as f:
@@ -148,6 +174,9 @@ def quality_of_compression(actual_grad, powersgd_grad_est, rescaled_powersgd_gra
             temp = torch.norm(ag - rpg)
             if temp != 0 and ROUND < 10:
                 f.write(f'{ag.shape} {torch.numel(ag)} {float(temp.numpy())}\n')
+            
+            # f.write(f'{ag.shape} {torch.numel(ag)} {float(temp.numpy())}\n')
+            
             rescaled_powersgd_power_test += temp
         
     print(f"powersgd power test = {powersgd_power_test}")
