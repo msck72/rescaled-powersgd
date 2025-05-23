@@ -50,7 +50,25 @@ def allreduce_average(data, *args, **kwargs):
         return SimpleNamespace(wait=lambda: None)
     
 def find_factors(n : int) -> Tuple[int, int]:
-    nearest_possible_factor = math.isqrt(n)
-    while n % nearest_possible_factor != 0:
-        nearest_possible_factor -= 1
-    return nearest_possible_factor, n // nearest_possible_factor
+    
+    print(f'FINDINF FACTORS OF {n}')
+    factors = set()
+    for i in range(1, int(n**0.5) + 1):
+        if n % i == 0:
+            factors.add(i)
+            # factors.add(n // i)
+    
+    factors = sorted(factors)
+    print(f'len(factors) = {len(factors)}, factors = {factors}')
+    mid_factor = factors[-2]
+    print(f'factor1 = {mid_factor}, factor2 = {n // mid_factor}')
+    return mid_factor, n // mid_factor
+
+def min_distance_factors(n: int) -> Tuple[int, int]:
+    i = int(n**0.5)
+    while n % i != 0:
+        i -= 1
+        
+    return i, n // i
+
+        
