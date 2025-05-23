@@ -11,7 +11,7 @@ from powersgd import optimizer_step
 from powersgd.powersgd_shape_manipulations import Aggregator, PowerSGD, Config
 from powersgd.utils import params_in_optimizer
 
-import numpy as np
+import os
 import matplotlib.pyplot as plt
 
 
@@ -166,6 +166,9 @@ def quality_of_compression(actual_grad, powersgd_grad_est, rescaled_powersgd_gra
     global ROUND
     global MODEL_NAME
     # compare how good the compression is in both the cases.
+    if not os.path.exists('powersgd_quality'):
+        os.makedirs('powersgd_quality')
+    
     with open(f'powersgd_quality/{MODEL_NAME}_{ROUND}.txt', 'w') as f:
         powersgd_quality = 0
         for i, (ag, pg) in enumerate(zip(actual_grad, powersgd_grad_est)):
@@ -177,6 +180,10 @@ def quality_of_compression(actual_grad, powersgd_grad_est, rescaled_powersgd_gra
             
             powersgd_quality += temp
     
+    
+    if not os.path.exists('rescaled_powersgd_quality'):
+        os.makedirs('rescaled_powersgd_quality')
+        
     with open(f'rescaled_powersgd_quality/{MODEL_NAME}_{ROUND}.txt', 'w') as f:
         rescaled_powersgd_quality = 0
         for i, (ag, rpg) in enumerate(zip(actual_grad, rescaled_powersgd_grad_est)):

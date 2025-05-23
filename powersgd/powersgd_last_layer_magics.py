@@ -26,22 +26,9 @@ class Aggregator(ABC):
         """
         pass
 
-    @abstractmethod
-    def aggregate_using_rescaled_grads(self, gradients: List[torch.Tensor]) -> List[torch.Tensor]:
-        pass
 
 class AllReduce(Aggregator):
     def aggregate(self, gradients: List[torch.Tensor]) -> List[torch.Tensor]:
-        if len(gradients) == 0:
-            return []
-        buffer, shapes = pack(gradients)
-        allreduce_average(buffer)
-        out = unpack(buffer, shapes)
-        for g in gradients:
-            g.zero_()
-        return out
-    
-    def aggregate_using_rescaled_grads(self, gradients: List[torch.Tensor]) -> List[torch.Tensor]:
         if len(gradients) == 0:
             return []
         buffer, shapes = pack(gradients)
@@ -95,17 +82,6 @@ class PowerSGD(Aggregator):
             self._allreduce.aggregate(uncompressed_grads),
         )
     
-    def aggregate_using_rescaled_grads(self, gradients: List[torch.Tensor]) -> List[torch.Tensor]:
-        self.step_counter_rescaled += 1
-        
-        if self.step_counter_rescaled < self.config.start_compressing_after_num_steps:
-            return self._allreduce.aggregate(gradients)
-
-        compressed_grads, uncompressed_grads = self._split(gradients)
-        return self._merge(
-            self._powersgd.aggregate_using_rescaled_grads(compressed_grads),
-            self._allreduce.aggregate(uncompressed_grads),
-        )
     
     def _split(self, params: List[torch.Tensor]):
         compressed_params = []
@@ -182,51 +158,9 @@ class BasicPowerSGD(Aggregator):
             ]
         )
         self._qs = unpack(self._qs_buffer, qs_shapes)
-
-
-        # For rescaled estimate of the gradient
-        # get the number of parameters in the params
-        grads_count = [torch.numel(p) for p in params]
-        total_grads_count = sum(grads_count)
-        
-        self.num_matrices = len(grads_count)
-
-        num_grads_per_matrix = total_grads_count // self.num_matrices
-
-        print('FINDING FACTORS')
-        self.mat_dim = int(math.sqrt(num_grads_per_matrix))
-        self.mat_dim1, self.mat_dim2  = self.mat_dim, self.mat_dim
-        # self.mat_dim1, self.mat_dim2 = min_distance_factors(num_grads_per_matrix)
-        print(f'self.mat_dim1 = {self.mat_dim1} and self.mat_dim2 = {self.mat_dim2}')
-        self.rem_grads = total_grads_count - (self.num_matrices * (self.mat_dim1 * self.mat_dim2))
-        
-        # find the factors of the remaining elements such that it forms almost a square matrix, i.e. the difference is minimal
-        dim1, dim2 = min_distance_factors(self.rem_grads) if self.rem_grads > 0 else (0, 0)
-        self.rem_grads_dim = (dim1, dim2)
-
-
-        # eff_num_grads_in_mat = self.mat_dim * self.mat_dim
-        # eff_num_grads_left_out = total_grads_count - (len(grads_count) * eff_num_grads_in_mat)
-        to_pack = [self._init_p_batch_with_len((self.mat_dim1, self.mat_dim2), self.num_matrices)]
-        if dim1 == 0 or dim2 == 0:
-            to_pack.append(self._init_p_batch_with_len((dim1, dim2), 1))
-        self._ps_rescaled_buffer, _ps_rescaled_shapes = pack(to_pack)
-        self._ps_rescaled = unpack(self._ps_rescaled_buffer, _ps_rescaled_shapes)
-    
-    
-        to_pack = [self._init_q_batch_with_len((self.mat_dim1, self.mat_dim2), self.num_matrices)]
-        if dim1 == 0 or dim2 == 0:
-            to_pack.append(self._init_q_batch_with_len((dim1, dim2), 1))
-        self._qs_rescaled_buffer, qs_rescaled_shapes = pack(to_pack)
-        self._qs_rescaled = unpack(self._qs_rescaled_buffer, qs_rescaled_shapes)
-
-        # divide those parameters equally by m (a hyper-parameter)
-        # convert those into sqaure matrices and batch them
-        # with rank as input now initialize the p and q matrices
         
         
         print(f"POWERSGD num_parameters = {torch.numel(self._ps_buffer) + torch.numel(self._qs_buffer)}")
-        print(f"RESCALED POWERSGD num_parameters = {torch.numel(self._ps_rescaled_buffer) + torch.numel(self._qs_rescaled_buffer)}")
         
 
     def aggregate(self, gradients: List[torch.Tensor]) -> List[torch.Tensor]:
@@ -323,106 +257,6 @@ class BasicPowerSGD(Aggregator):
 
         return output_tensors
     
-    def aggregate_using_rescaled_grads(self, gradients: List[torch.Tensor]) -> List[torch.Tensor]:
-        # print('In aggreagte usnig rescaled grads')
-        # flatten the gradient into a single tensor and also remember the shape for re-building in future
-        # print('In rescaled powersgd aggregate function')
-        unsqueezed_shapes = []
-        squeezed_grads = []
-        for g in gradients:
-            unsqueezed_shapes.append((torch.numel(g), g.shape))
-            squeezed_grads.append(g.view(-1))
-        single_dim_grads = torch.cat(squeezed_grads)
-
-        # build a batched rescaled gradients square matrices
-        rescaled_grads = []
-        left, right = 0, self.mat_dim1 * self.mat_dim2
-        for i in range(self.num_matrices):
-            rescaled_grads.append(single_dim_grads[left:right].view(self.mat_dim1, self.mat_dim2))
-            left, right = right, right + (self.mat_dim1 * self.mat_dim2)
-
-        rem_grad_mat = None
-        if self.rem_grads_dim[0] != 0 and self.rem_grads_dim[1] != 0:        
-            rem_grad_mat = single_dim_grads[left:].view(self.rem_grads_dim).unsqueeze(0)
-
-        assert (self.num_matrices * (self.mat_dim1 * self.mat_dim2)) + (torch.numel(rem_grad_mat) if rem_grad_mat is not None else 0) == torch.numel(single_dim_grads)
-
-        grad_batches = [torch.stack(rescaled_grads)]
-        if rem_grad_mat is not None:
-            grad_batches.append(rem_grad_mat)
-        approximation = [torch.zeros_like(gb) for gb in grad_batches]
-        
-        # for grad_batch in grad_batches:
-        #     print(f'grad_batch.shape = ', grad_batch.shape)
-        
-
-        num_iters_per_step = self.config.num_iters_per_step
-        for it in range(num_iters_per_step):
-            # print('Hi')
-            # Alternate between left and right matrix multiplications
-            iter_is_even = (self.step_counter_rescaled * num_iters_per_step + it) % 2 == 0
-            if iter_is_even:
-                maybe_transpose = lambda g: g
-                out_batches, in_batches = self._qs_rescaled, self._ps_rescaled
-                out_buffer = self._qs_rescaled_buffer
-            else:
-                maybe_transpose = batch_transpose
-                out_batches, in_batches = self._ps_rescaled, self._qs_rescaled
-                out_buffer = self._ps_rescaled_buffer
-
-            # Matrix multiplication to estimate the out-batch
-            
-            for grad_batch, in_batch, out_batch in zip(grad_batches, in_batches, out_batches):
-                orthogonalize(in_batch)
-                torch.bmm(
-                    batch_transpose(maybe_transpose(grad_batch)), 
-                    in_batch, 
-                    out=out_batch
-                )
-
-            # put the error in the grad-batch
-            for grad_batch, in_batch, out_batch in zip(grad_batches, in_batches, out_batches):
-                maybe_transpose(grad_batch).baddbmm_(
-                    in_batch, 
-                    batch_transpose(out_batch),
-                    alpha=-1
-                )
-
-            # Average across workers
-            if is_distributed():
-                num_workers = torch.distributed.get_world_size()
-                torch.distributed.all_reduce(out_buffer)
-            else:
-                num_workers = 1
-                
-            
-            # update the approximation
-            for approx, in_batch, out_batch in zip(approximation, in_batches, out_batches):
-                maybe_transpose(approx).baddbmm_(
-                    in_batch, 
-                    batch_transpose(out_batch),
-                    alpha=1/num_workers
-                )
-
-        # rebuild the gradient
-        output_tensors = []
-        single_dim_approx_grads = torch.cat([app.view(-1) for app in approximation])
-        single_dim_error = torch.cat([gb.view(-1) for gb in grad_batches])
-        left, right = 0, 0
-        for i, (num_elements, shape) in enumerate(unsqueezed_shapes):
-            left, right = right, right + num_elements
-            output_tensors.append(single_dim_approx_grads[left:right].view(shape))
-            gradients[i].copy_(single_dim_error[left:right].view(shape))
-
-        # Increment the step counter
-        self.step_counter_rescaled += 1
-
-        # output_tensors.append(grad_batches[1].view(self.rem_grads_dim))
-        
-        # for o in output_tensors:
-        #     print(o.shape)
-        return output_tensors
-    
     
     def _init_p_batch(
         self, shape: torch.Size, params: List[torch.Tensor]
@@ -450,22 +284,6 @@ class BasicPowerSGD(Aggregator):
             [len(params), shape[1], rank], generator=self.generator, device=self.device
         )
     
-
-    def _init_p_batch_with_len(
-        self, shape: torch.Size, params_len: int
-    ) -> torch.Tensor:
-        rank = min(self.config.rank, min(shape))
-        return torch.randn(
-            [params_len, shape[0], rank], generator=self.generator, device=self.device
-        )
-
-    def _init_q_batch_with_len(
-        self, shape: torch.Size, params_len: int
-    ) -> torch.Tensor:
-        rank = min(self.config.rank, min(shape))
-        return torch.randn(
-            [params_len, shape[1], rank], generator=self.generator, device=self.device
-        )
 
     @classmethod
     def _matrices_per_shape(

@@ -3,9 +3,7 @@ from torch import nn
 import torch.nn.functional as F
 
 from torchvision.models import resnet18, vgg16, resnet50
-from torchvision.datasets import CIFAR10
 from torch.utils.data import DataLoader
-from torchvision import transforms
 
 from powersgd import optimizer_step, optimizer_step_naive_powersgd
 from powersgd.powersgd_last_layer_magics import Aggregator, PowerSGD, Config
